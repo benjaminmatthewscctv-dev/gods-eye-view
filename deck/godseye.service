@@ -1,0 +1,16 @@
+# God's Eye View (upstream, untouched checkout at ~/gods-eye-view) served on 127.0.0.1:4173 for the cyberdeck's MAP tab.
+# User unit: systemctl --user enable --now godseye.service   (setup.sh does this)
+[Unit]
+Description=God's Eye View globe for the cyberdeck (Vite dev server, loopback only)
+After=network.target
+
+[Service]
+Environment=GEV_ROOT=%h/gods-eye-view
+Environment=NODE_OPTIONS=--max-old-space-size=1536
+WorkingDirectory=%h/gods-eye-view
+ExecStart=/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && nvm use --silent 24 >/dev/null; exec npx vite --config "$HOME/godseye/vite.deck.config.mjs" --host 127.0.0.1 --port 4173'
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
