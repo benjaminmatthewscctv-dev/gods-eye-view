@@ -1162,6 +1162,9 @@ still waiting to drain reschedules that deadline, so a slow client does not read
 as a stalled upstream. Error responses are cancelled. Buffered snapshots have a
 16 MiB streaming cap; an oversized image remains an upstream miss and uses the
 normal fallback chain. The existing declared media size ceiling remains 64 MiB.
+`/api/cctv/media` relays live feeds (HLS, MP4, WebM, MJPEG) only; a still-image
+camera is refused there with a JSON 404 and is served solely through
+`/api/cctv/frame` and its same-origin, `image/*`-only, size-capped fetch.
 
 ## GBFS upstream bounds
 
