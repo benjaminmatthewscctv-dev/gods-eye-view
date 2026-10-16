@@ -14,8 +14,8 @@
 import * as Cesium from 'cesium';
 
 const POLL_MS = 200;            // the deck's /gev/pos is cheap; the deck hub's GPS runs at 5 Hz
-const LAG_MS = 400;             // render this far behind "now" so there is always a sample ahead to interpolate towards
-const EXTRAPOLATE_S = 1.5;      // keep moving (constant velocity) for this long when fixes stall
+const LAG_MIN_MS = 350, LAG_MAX_MS = 2500;   // render behind "now" by ~1.4 fix intervals: 5 Hz deck hub -> ~0.35 s, 1 Hz phone -> ~1.4 s
+const EXTRAPOLATE_S = 3.0;      // keep moving (constant velocity) for this long when fixes stall
 const MIN_SPEED_MPH = 2;        // below this the GPS course is noise: hold the last heading
 
 function waitForEmbed() {
@@ -34,7 +34,7 @@ async function main() {
   position.forwardExtrapolationDuration = EXTRAPOLATE_S;
   position.backwardExtrapolationType = Cesium.ExtrapolationType.HOLD;
 
-  const state = { heading: 0, mph: 0, mode: 'chase', fix: false, active: false, lastT: 0, lastFixMs: 0, pitchTop: -89 };
+  const state = { heading: 0, mph: 0, mode: 'chase', fix: false, active: false, lastT: 0, lastFixMs: 0, pitchTop: -89, lastLat: NaN, lastLon: NaN, intervals: [], lagMs: 1400 };
   const marker = viewer.entities.add({
     id: 'cyberdeck-vehicle',
     position,
@@ -49,8 +49,12 @@ async function main() {
       if (!r.ok) throw new Error(String(r.status));
       const p = await r.json();
       state.mode = p.camera || 'chase'; state.active = !!p.nav_active; state.fix = !!p.fix;
-      if (p.fix && Number.isFinite(p.lat) && Number.isFinite(p.lon) && p.t && p.t !== state.lastT) {
-        state.lastT = p.t; state.lastFixMs = performance.now();
+      // one sample per REAL fix: a new time and a new place (the deck repeats the last fix while it waits for the next)
+      if (p.fix && Number.isFinite(p.lat) && Number.isFinite(p.lon) && p.t && p.t !== state.lastT && !(p.lat === state.lastLat && p.lon === state.lastLon)) {
+        if (state.lastT) { state.intervals.push(p.t - state.lastT); if (state.intervals.length > 8) state.intervals.shift(); }
+        const sorted = [...state.intervals].sort((a, b) => a - b); const median = sorted.length ? sorted[sorted.length >> 1] : 1.0;
+        state.lagMs = Math.min(LAG_MAX_MS, Math.max(LAG_MIN_MS, median * 1400));
+        state.lastT = p.t; state.lastFixMs = performance.now(); state.lastLat = p.lat; state.lastLon = p.lon;
         const when = Cesium.JulianDate.fromDate(new Date(p.t * 1000));
         position.addSample(when, Cesium.Cartesian3.fromDegrees(p.lon, p.lat, 0));
         state.mph = Number(p.mph) || 0;
@@ -69,7 +73,7 @@ async function main() {
     const mode = state.mode;
     if (!state.fix || (mode !== 'chase' && mode !== 'top')) return;
     if (performance.now() - state.lastFixMs > 15000) return;          // no fix for 15 s: let go of the camera
-    const now = Cesium.JulianDate.addSeconds(Cesium.JulianDate.now(), -LAG_MS / 1000, new Cesium.JulianDate());
+    const now = Cesium.JulianDate.addSeconds(Cesium.JulianDate.now(), -state.lagMs / 1000, new Cesium.JulianDate());
     const pos = position.getValue(now, scratch);
     if (!pos) return;
     viewer.camera.cancelFlight();
