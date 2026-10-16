@@ -27,8 +27,11 @@ if [ ! -d node_modules ] || [ package-lock.json -nt node_modules/.package-lock.j
 fi
 
 mkdir -p ~/godseye ~/.config/systemd/user
-cp "$HERE/vite.deck.config.mjs" ~/godseye/
+cp "$HERE/vite.deck.config.mjs" "$HERE/aldot_cameras.py" ~/godseye/
+python3 ~/godseye/aldot_cameras.py || echo "(ALDOT camera list not refreshed; the previous file, if any, stays)"
 [ -f ~/godseye/godseye.env ] || cp "$HERE/godseye.env" ~/godseye/godseye.env       # local edits (keys) survive re-runs
+# new settings in deck/godseye.env are appended to the local file (values already there, such as keys, are never changed)
+while IFS= read -r line; do k="${line%%=*}"; case "$line" in \#*|"") continue;; esac; grep -q "^$k=" ~/godseye/godseye.env || echo "$line" >> ~/godseye/godseye.env; done < "$HERE/godseye.env"
 cp ~/godseye/godseye.env "$ROOT/.env"                                             # upstream reads .env itself (HOST/PORT/keys)
 cp "$HERE/godseye.service" ~/.config/systemd/user/
 systemctl --user daemon-reload
