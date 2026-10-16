@@ -22,7 +22,8 @@ repo under `pi/cyberdeck/` (`nav.py`, `front.html`, `cyberdeck.py`); it talks to
 | `setup.sh` | one command on the Pi: Node 24 (nvm), `npm ci`, the wrapper, the user service |
 | `vite.deck.config.mjs` | upstream's Vite config wrapped: `POST /api/hud-summary` goes to the mind (`DECK_MIND_URL`) instead of OpenAI |
 | `godseye.env` | `HOST/PORT` (loopback :4173), `GEV_EMBED_FRAME_ANCESTORS` (the deck window may frame the embed page), `DECK_MIND_URL`, optional upstream keys |
-| `godseye.service` | the user unit |
+| `godseye.service` | the user unit (refreshes the ALDOT camera list on every start) |
+| `aldot_cameras.py` | ALDOT's ALGO Traffic cameras (statewide, HLS + snapshot) written as the CCTV layer's source file, `CCTV_SOURCES_FILE` in `godseye.env` |
 
 On the Pi the checkout is `~/gods-eye-view` (this branch), the wrapper is copied to `~/godseye/`, and the AI-Cyberdeck
 staging bundle's `pi/godseye/setup.sh` is only a pointer that clones this branch and runs `deck/setup.sh`.
