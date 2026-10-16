@@ -241,6 +241,8 @@ export function installViews({
     });
   if (!isEmbedded(location)) return () => {};
 
+  // cyberdeck branch: the deck's follow script (deck/follow.js) drives the camera from the viewer in embed mode
+  globalThis.__gevEmbed = Object.freeze({ viewer, dataManager, run });
   windowRef.document.body.classList.add('ui-embed');
   shell.setCleanView?.(true);
   const stopRendering = isEmbeddedInline()

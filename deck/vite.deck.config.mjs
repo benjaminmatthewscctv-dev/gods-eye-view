@@ -61,7 +61,17 @@ function readBody(req, limit = 64 * 1024) {
 /** The deck's additions, mounted before upstream's own middlewares. */
 function deckPlugin() {
   const mind = (process.env.DECK_MIND_URL || '').replace(/\/+$/, '');
+  const deckApp = (process.env.DECK_APP_URL || 'http://127.0.0.1:8130').replace(/\/+$/, '');
   const install = (server) => {
+    // the deck's position for deck/follow.js: a loopback proxy, so the embed page stays same-origin (its CSP allows no plain-http hosts)
+    server.middlewares.use('/deck/pos', async (req, res) => {
+      res.setHeader('Cache-Control', 'no-store'); res.setHeader('Content-Type', 'application/json');
+      try {
+        const ctl = new AbortController(); const timer = setTimeout(() => ctl.abort(), 1500);
+        const r = await fetch(`${deckApp}/gev/pos`, { signal: ctl.signal }); clearTimeout(timer);
+        res.statusCode = r.status; res.end(await r.text());
+      } catch { res.statusCode = 503; res.end('{"ok":false,"error":"deck app not answering"}'); }
+    });
     server.middlewares.use('/api/hud-summary', async (req, res, next) => {
       if (!mind || req.method !== 'POST') return next();
       const send = (code, obj) => {
@@ -102,6 +112,15 @@ function deckPlugin() {
     enforce: 'pre',
     configureServer: install,
     configurePreviewServer: install,
+    // the follow script rides along only on the embed page (the deck window's MAP tab); the normal page is upstream's
+    transformIndexHtml: {
+      order: 'post',
+      handler(html, ctx) {
+        const url = ctx.originalUrl || ctx.path || '';
+        if (!/[?&]embed=1(&|$)/.test(url)) return html;
+        return [{ tag: 'script', attrs: { type: 'module', src: '/deck/follow.js' }, injectTo: 'body' }];
+      },
+    },
   };
 }
 
