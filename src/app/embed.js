@@ -123,6 +123,13 @@ const delay = (ms, signal) =>
 
 /** Fly the camera to a view's camera and resolve when the flight ends. */
 function flyTo(viewer, camera) {
+  // cyberdeck branch: while the deck's follow script (deck/follow.js) owns the camera - chase/top with a live fix - a posted view
+  // only updates layers, pins and the route. Flying to its camera fought the follow camera on every update: the "random zoom and
+  // pan" while driving a route.
+  const follow = globalThis.__deckFollow?.state;
+  if (follow && follow.fix && (follow.mode === 'chase' || follow.mode === 'top') && performance.now() - follow.lastFixMs < 15000)
+    return Promise.resolve(true);
+  if (!camera || !Number.isFinite(camera.lat) || !Number.isFinite(camera.lon)) return Promise.resolve(true);
   announceNavigationAuthority('embed-view');
   return new Promise((resolve) => {
     viewer.camera.flyTo({

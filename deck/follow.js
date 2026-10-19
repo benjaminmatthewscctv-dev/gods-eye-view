@@ -12,11 +12,14 @@
  * Needs globalThis.__gevEmbed = { viewer } (one line in src/app/embed.js on the cyberdeck branch).
  */
 import * as Cesium from 'cesium';
+import { setScopeMaskEnabled, isScopeMaskEnabled } from '/src/scopeMask.js';
 
 const POLL_MS = 200;            // the deck's /gev/pos is cheap; the deck hub's GPS runs at 5 Hz
 const LAG_MIN_MS = 350, LAG_MAX_MS = 2500;   // render behind "now" by ~1.4 fix intervals: 5 Hz deck hub -> ~0.35 s, 1 Hz phone -> ~1.4 s
 const EXTRAPOLATE_S = 3.0;      // keep moving (constant velocity) for this long when fixes stall
-const MIN_SPEED_MPH = 2;        // below this the GPS course is noise: hold the last heading
+const MIN_SPEED_MPH = 4;        // below this the GPS course is noise: hold the last heading (2 let stops swing the view)
+const RANGE_EASE_S = 2.5;       // the chase distance follows speed slowly - a stop or a burst of speed no longer snaps the zoom
+const HEADING_EASE_S = 0.8;     // the view turns with the road smoothly instead of jumping to each GPS course
 
 function waitForEmbed() {
   return new Promise((resolve) => {
@@ -28,6 +31,10 @@ function waitForEmbed() {
 async function main() {
   const { viewer } = await waitForEmbed();
   const scene = viewer.scene;
+  // The deck's screen is the whole map: GEV's signature circular "scope" mask (scopeMask.js, on by default) blacks out everything
+  // outside a keyhole circle. Off in the deck view, and kept off if the app's restored state turns it back on.
+  const scopeOff = () => { try { if (isScopeMaskEnabled()) setScopeMaskEnabled(false); } catch { /* older app build */ } };
+  scopeOff(); setInterval(scopeOff, 2000);
   const position = new Cesium.SampledPositionProperty();
   position.setInterpolationOptions({ interpolationDegree: 1, interpolationAlgorithm: Cesium.LinearApproximation });
   position.forwardExtrapolationType = Cesium.ExtrapolationType.EXTRAPOLATE;
@@ -69,6 +76,7 @@ async function main() {
 
   const scratch = new Cesium.Cartesian3();
   const hpr = new Cesium.HeadingPitchRange();
+  let lastFrameMs = 0;
   function frame() {
     const mode = state.mode;
     if (!state.fix || (mode !== 'chase' && mode !== 'top')) return;
@@ -77,11 +85,17 @@ async function main() {
     const pos = position.getValue(now, scratch);
     if (!pos) return;
     viewer.camera.cancelFlight();
-    // range grows with speed so the road ahead stays in view; the chase sits behind and above, "top" looks straight down
-    const range = mode === 'top' ? 500 + Math.min(1500, state.mph * 20) : 160 + Math.min(900, state.mph * 12);
-    hpr.heading = Cesium.Math.toRadians(state.heading);
+    const t = performance.now(), dt = lastFrameMs ? Math.min(0.5, (t - lastFrameMs) / 1000) : 0; lastFrameMs = t;
+    // range grows with speed so the road ahead stays in view; the chase sits behind and above, "top" looks straight down.
+    // Both the range and the heading ease toward their targets (exponential, frame-rate independent) instead of snapping.
+    const target = mode === 'top' ? 600 + Math.min(1200, state.mph * 15) : 260 + Math.min(560, state.mph * 8);
+    if (!Number.isFinite(state.viewRange) || state.viewMode !== mode) { state.viewRange = target; state.viewHeading = state.heading; state.viewMode = mode; }
+    state.viewRange += (target - state.viewRange) * (1 - Math.exp(-dt / RANGE_EASE_S));
+    const dh = ((state.heading - state.viewHeading + 540) % 360) - 180;          // shortest way round
+    state.viewHeading = (state.viewHeading + dh * (1 - Math.exp(-dt / HEADING_EASE_S)) + 360) % 360;
+    hpr.heading = Cesium.Math.toRadians(state.viewHeading);
     hpr.pitch = Cesium.Math.toRadians(mode === 'top' ? state.pitchTop : -32);
-    hpr.range = range;
+    hpr.range = state.viewRange;
     viewer.camera.lookAt(pos, hpr);
   }
   scene.preRender.addEventListener(frame);
