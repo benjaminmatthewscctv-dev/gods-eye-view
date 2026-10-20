@@ -240,6 +240,23 @@ export function createWorldAnnotationRenderer(viewer) {
       const positions = Cesium.Cartesian3.fromDegreesArray(
         anno.path.flatMap((p) => [p.lon, p.lat]),
       );
+      if (globalThis.__gevEmbed) {
+        // cyberdeck branch (embedded on the deck's Pi 5): a 126 km draped route with the flowing dash material made the
+        // follow camera stutter while navigating (smooth with no route). Here the route is a plain colour (no per-frame
+        // material) and only the stretch around the deck is draped: DECK_AHEAD_M ahead, DECK_BEHIND_M behind, re-cut
+        // when the deck has moved DECK_RECUT_M along it. Without a deck position the whole route is drawn.
+        const entity = dataSource.entities.add({
+          polyline: {
+            positions,
+            width: 7,
+            material: new Cesium.ColorMaterialProperty(base.withAlpha(0.85)),
+            clampToGround: true,
+            classificationType: CLASSIFY,
+          },
+        });
+        entities.push(entity);
+        deckTrimRoute(anno, entity);
+      } else
       entities.push(
         dataSource.entities.add({
           polyline: {
@@ -317,7 +334,43 @@ export function createWorldAnnotationRenderer(viewer) {
     });
   }
 
+  // cyberdeck branch: keep only the part of a route near the deck draped on the tiles (see the route branch in add)
+  const DECK_AHEAD_M = 5000, DECK_BEHIND_M = 300, DECK_RECUT_M = 250;
+  function deckTrimRoute(anno, entity) {
+    const pts = anno.path; const n = pts.length;
+    const cum = new Float64Array(n);
+    for (let i = 1; i < n; i++) {
+      const dy = (pts[i].lat - pts[i - 1].lat) * 111320;
+      const dx = (pts[i].lon - pts[i - 1].lon) * 111320 * Math.cos((pts[i].lat * Math.PI) / 180);
+      cum[i] = cum[i - 1] + Math.hypot(dx, dy);
+    }
+    let lastAlong = -1e9, hint = 0;
+    const cut = () => {
+      const d = globalThis.__deckFollow?.state?.disp;
+      if (!d || !entity.polyline) return;
+      // nearest route point, searched around the last match first (then everywhere if that is far off)
+      const near = (lo, hi) => { let best = -1, bd = Infinity; for (let i = Math.max(0, lo); i < Math.min(n, hi); i++) {
+        const dy = (pts[i].lat - d.lat) * 111320, dx = (pts[i].lon - d.lon) * 111320 * Math.cos((d.lat * Math.PI) / 180);
+        const dd = dx * dx + dy * dy; if (dd < bd) { bd = dd; best = i; } } return [best, Math.sqrt(bd)]; };
+      let [i, dist] = near(hint - 50, hint + 400);
+      if (dist > 300) [i, dist] = near(0, n);
+      if (i < 0) return;
+      hint = i;
+      const along = cum[i];
+      if (Math.abs(along - lastAlong) < DECK_RECUT_M) return;
+      lastAlong = along;
+      let a = i, b = i;
+      while (a > 0 && along - cum[a] < DECK_BEHIND_M) a--;
+      while (b < n - 1 && cum[b] - along < DECK_AHEAD_M) b++;
+      if (b - a < 1) return;
+      entity.polyline.positions = Cesium.Cartesian3.fromDegreesArray(pts.slice(a, b + 1).flatMap((p) => [p.lon, p.lat]));
+    };
+    cut();
+    anno._deckTrim = setInterval(cut, 1000);
+  }
+
   function remove(anno) {
+    if (anno?._deckTrim) { clearInterval(anno._deckTrim); anno._deckTrim = null; }
     hideOsmCredit(viewer, anno);
     osmAnnotations.delete(anno);
     if (!anno?._entities) return;
