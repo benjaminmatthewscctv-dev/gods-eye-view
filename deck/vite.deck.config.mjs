@@ -72,6 +72,15 @@ function deckPlugin() {
         res.statusCode = r.status; res.end(await r.text());
       } catch { res.statusCode = 503; res.end('{"ok":false,"error":"deck app not answering"}'); }
     });
+    // the route the deck is navigating (deck/follow.js draws it as the progress bar)
+    server.middlewares.use('/deck/route', async (req, res) => {
+      res.setHeader('Cache-Control', 'no-store'); res.setHeader('Content-Type', 'application/json');
+      try {
+        const ctl = new AbortController(); const timer = setTimeout(() => ctl.abort(), 4000);
+        const r = await fetch(`${deckApp}/gev/route`, { signal: ctl.signal }); clearTimeout(timer);
+        res.statusCode = r.status; res.end(await r.text());
+      } catch { res.statusCode = 503; res.end('{"ok":false,"error":"deck app not answering"}'); }
+    });
     server.middlewares.use('/api/hud-summary', async (req, res, next) => {
       if (!mind || req.method !== 'POST') return next();
       const send = (code, obj) => {

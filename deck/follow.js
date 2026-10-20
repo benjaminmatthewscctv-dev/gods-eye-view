@@ -68,6 +68,7 @@ async function main() {
       if (!r.ok) throw new Error(String(r.status));
       const p = await r.json();
       state.mode = p.camera || 'chase'; state.active = !!p.nav_active; state.fix = !!p.fix;
+      syncRoute(p.nav_active ? (p.route_t ?? null) : null);
       // one update per REAL fix: a new time and a new place (the deck repeats the last fix while it waits for the next)
       if (p.fix && Number.isFinite(p.lat) && Number.isFinite(p.lon) && p.t && p.t !== state.lastT && !(p.lat === state.lastLat && p.lon === state.lastLon)) {
         const tMs = Number.isFinite(p.fix_t) ? p.fix_t * 1000 : (p.t - ARRIVAL_LAG_S) * 1000;
@@ -115,6 +116,76 @@ async function main() {
       state.ground = state.altMsl + GEOID_N - ABOVE_GROUND_M; state.groundSrc = 'gps';
     }
   }
+
+  // ---- the route as a progress bar (owner 2026-10-20): the route the deck is navigating (/deck/route), draped on the map around
+  // the deck - orange for the road still ahead, light amber for the road already driven, split exactly at the deck's position.
+  // Only ROUTE_BEHIND_M .. ROUTE_AHEAD_M is draped (the whole 100+ km route draped every frame made the Pi stutter), re-cut
+  // every ROUTE_RECUT_M of progress; the split itself is one material uniform per frame, so the line is not rebuilt as it moves.
+  const ROUTE_AHEAD_M = 5000, ROUTE_BEHIND_M = 1500, ROUTE_RECUT_M = 250;
+  const AHEAD = Cesium.Color.fromCssColorString('#ff8c1a').withAlpha(0.95), BEHIND = Cesium.Color.fromCssColorString('#ffd58a').withAlpha(0.8);
+  new Cesium.Material({ fabric: { type: 'DeckRouteProgress', uniforms: { ahead: AHEAD, behind: BEHIND, split: -1.0 }, source: `
+    czm_material czm_getMaterial(czm_materialInput materialInput) {
+      czm_material m = czm_getDefaultMaterial(materialInput);
+      float w = smoothstep(split - 0.002, split + 0.002, materialInput.st.s);
+      vec4 c = mix(behind, ahead, w);
+      m.diffuse = c.rgb; m.emission = c.rgb * 0.35; m.alpha = c.a;
+      return m;
+    }` } });
+  const route = { t: null, pts: null, cum: null, win: null, hint: 0, lastAlong: -1e9, entity: null, fetching: false };
+  function ProgressMat() { this._definitionChanged = new Cesium.Event(); }
+  Object.defineProperties(ProgressMat.prototype, { isConstant: { get: () => false }, definitionChanged: { get() { return this._definitionChanged; } } });
+  ProgressMat.prototype.getType = () => 'DeckRouteProgress';
+  ProgressMat.prototype.equals = function (o) { return this === o; };
+  ProgressMat.prototype.getValue = function (time, result) {
+    result = result || {}; result.ahead = AHEAD; result.behind = BEHIND;
+    const along = routeAlong();
+    result.split = route.win && along != null && route.win[1] > route.win[0] ? (along - route.win[0]) / (route.win[1] - route.win[0]) : -1.0;
+    return result;
+  };
+  const kx = (lat) => M_PER_DEG * Math.cos(Cesium.Math.toRadians(lat));
+  function routeAlong() {                                              // the deck's distance along the route (projected on the nearest segment)
+    const d = state.disp, p = route.pts; if (!d || !p) return null;
+    const k = kx(d.lat); let best = null, bd = Infinity;
+    for (let i = Math.max(1, route.hint - 3); i < Math.min(p.length, route.hint + 5); i++) {
+      const ax = p[i - 1][1] * k, ay = p[i - 1][0] * M_PER_DEG, bx = p[i][1] * k, by = p[i][0] * M_PER_DEG, px = d.lon * k, py = d.lat * M_PER_DEG;
+      const vx = bx - ax, vy = by - ay, L2 = vx * vx + vy * vy || 1, t = Math.max(0, Math.min(1, ((px - ax) * vx + (py - ay) * vy) / L2));
+      const ex = ax + t * vx - px, ey = ay + t * vy - py, dd = ex * ex + ey * ey;
+      if (dd < bd) { bd = dd; best = route.cum[i - 1] + t * (route.cum[i] - route.cum[i - 1]); }
+    }
+    return best;
+  }
+  function recut() {                                                    // move the draped window along with the deck
+    const d = state.disp, p = route.pts; if (!d || !p || p.length < 2) return;
+    const k = kx(d.lat), near = (lo, hi) => { let b = -1, bd = Infinity; for (let i = Math.max(0, lo); i < Math.min(p.length, hi); i++) {
+      const dx = (p[i][1] - d.lon) * k, dy = (p[i][0] - d.lat) * M_PER_DEG, dd = dx * dx + dy * dy; if (dd < bd) { bd = dd; b = i; } } return [b, Math.sqrt(bd)]; };
+    let [i, dist] = near(route.hint - 50, route.hint + 400); if (dist > 300) [i, dist] = near(0, p.length);
+    if (i < 0) return; route.hint = i;
+    const along = route.cum[i]; if (route.entity && Math.abs(along - route.lastAlong) < ROUTE_RECUT_M) return;
+    route.lastAlong = along;
+    let a = i, b = i; while (a > 0 && along - route.cum[a] < ROUTE_BEHIND_M) a--; while (b < p.length - 1 && route.cum[b] - along < ROUTE_AHEAD_M) b++;
+    if (b - a < 1) return;
+    const positions = Cesium.Cartesian3.fromDegreesArray(p.slice(a, b + 1).flatMap((q) => [q[1], q[0]]));
+    if (!route.entity) route.entity = viewer.entities.add({ id: 'cyberdeck-route', polyline: { positions, width: 8, material: new ProgressMat(), clampToGround: true, classificationType: Cesium.ClassificationType.BOTH } });
+    else route.entity.polyline.positions = positions;
+    route.win = [route.cum[a], route.cum[b]];
+  }
+  async function syncRoute(routeT) {
+    if (routeT === route.t || route.fetching) return;
+    if (!routeT) { route.t = null; route.pts = null; route.win = null; if (route.entity) { viewer.entities.remove(route.entity); route.entity = null; } return; }
+    route.fetching = true;
+    try {
+      const r = await (await fetch('/deck/route', { cache: 'no-store' })).json();
+      const p = (r.points || []).filter((q) => Number.isFinite(q[0]) && Number.isFinite(q[1]));
+      if (p.length >= 2) {
+        const cum = new Float64Array(p.length);
+        for (let i = 1; i < p.length; i++) cum[i] = cum[i - 1] + Math.hypot((p[i][1] - p[i - 1][1]) * kx(p[i][0]), (p[i][0] - p[i - 1][0]) * M_PER_DEG);
+        Object.assign(route, { t: r.route_t ?? routeT, pts: p, cum, hint: 0, lastAlong: -1e9 });
+        recut();
+      }
+    } catch { /* try again on the next poll */ } finally { route.fetching = false; }
+  }
+  globalThis.__deckRoute = route;
+  setInterval(recut, 1000);
 
   const hpr = new Cesium.HeadingPitchRange();
   let lastFrameMs = 0;
