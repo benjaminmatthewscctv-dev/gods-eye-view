@@ -242,14 +242,16 @@ export function createWorldAnnotationRenderer(viewer) {
       );
       if (globalThis.__gevEmbed) {
         // cyberdeck branch (embedded on the deck's Pi 5): a 126 km draped route with the flowing dash material made the
-        // follow camera stutter while navigating (smooth with no route). Here the route is a plain colour (no per-frame
-        // material) and only the stretch around the deck is draped: DECK_AHEAD_M ahead, DECK_BEHIND_M behind, re-cut
-        // when the deck has moved DECK_RECUT_M along it. Without a deck position the whole route is drawn.
+        // follow camera stutter while navigating (smooth with no route). Here only the stretch around the deck is draped
+        // (DECK_AHEAD_M ahead, DECK_BEHIND_M behind, re-cut when the deck has moved DECK_RECUT_M along it) and it reads as
+        // a PROGRESS BAR (owner 2026-10-20): orange ahead, light amber for the road already driven, split exactly at the
+        // deck's position projected on the route - one uniform per frame, the geometry is not rebuilt as the split moves.
+        // Without a deck position the whole route is drawn orange.
         const entity = dataSource.entities.add({
           polyline: {
             positions,
-            width: 7,
-            material: new Cesium.ColorMaterialProperty(base.withAlpha(0.85)),
+            width: 8,
+            material: new ProgressMaterialProperty(anno),
             clampToGround: true,
             classificationType: CLASSIFY,
           },
@@ -335,7 +337,7 @@ export function createWorldAnnotationRenderer(viewer) {
   }
 
   // cyberdeck branch: keep only the part of a route near the deck draped on the tiles (see the route branch in add)
-  const DECK_AHEAD_M = 5000, DECK_BEHIND_M = 300, DECK_RECUT_M = 250;
+  const DECK_AHEAD_M = 5000, DECK_BEHIND_M = 1500, DECK_RECUT_M = 250;
   function deckTrimRoute(anno, entity) {
     const pts = anno.path; const n = pts.length;
     const cum = new Float64Array(n);
@@ -345,6 +347,20 @@ export function createWorldAnnotationRenderer(viewer) {
       cum[i] = cum[i - 1] + Math.hypot(dx, dy);
     }
     let lastAlong = -1e9, hint = 0;
+    anno._deckWin = null;                                     // [along at the window start, along at its end] once cut
+    // the deck's distance along the route, projected onto the nearest segment (continuous, so the split glides)
+    anno._deckAlong = () => {
+      const d = globalThis.__deckFollow?.state?.disp; if (!d) return null;
+      const k = Math.cos((d.lat * Math.PI) / 180); let best = null, bd = Infinity;
+      for (let i = Math.max(1, hint - 3); i < Math.min(n, hint + 4); i++) {
+        const ax = pts[i - 1].lon * 111320 * k, ay = pts[i - 1].lat * 111320, bx = pts[i].lon * 111320 * k, by = pts[i].lat * 111320;
+        const px = d.lon * 111320 * k, py = d.lat * 111320, vx = bx - ax, vy = by - ay, L2 = vx * vx + vy * vy || 1;
+        const t = Math.max(0, Math.min(1, ((px - ax) * vx + (py - ay) * vy) / L2));
+        const ex = ax + t * vx - px, ey = ay + t * vy - py, dd = ex * ex + ey * ey;
+        if (dd < bd) { bd = dd; best = cum[i - 1] + t * (cum[i] - cum[i - 1]); }
+      }
+      return best;
+    };
     const cut = () => {
       const d = globalThis.__deckFollow?.state?.disp;
       if (!d || !entity.polyline) return;
@@ -364,6 +380,7 @@ export function createWorldAnnotationRenderer(viewer) {
       while (b < n - 1 && cum[b] - along < DECK_AHEAD_M) b++;
       if (b - a < 1) return;
       entity.polyline.positions = Cesium.Cartesian3.fromDegreesArray(pts.slice(a, b + 1).flatMap((p) => [p.lon, p.lat]));
+      anno._deckWin = [cum[a], cum[b]];
     };
     cut();
     anno._deckTrim = setInterval(cut, 1000);
@@ -494,6 +511,51 @@ FlowMaterialProperty.prototype.getValue = function getValue(time, result) {
 FlowMaterialProperty.prototype.equals = function equals(other) {
   return this === other;
 };
+
+
+// cyberdeck branch: the route as a progress bar - st.s runs 0 -> 1 along the drawn polyline; everything before `split` is the
+// road already driven (light amber), everything after is still ahead (orange). The split is the deck's own position.
+const PROGRESS_AHEAD = Cesium.Color.fromCssColorString('#ff8c1a').withAlpha(0.95);    // orange: still to drive
+const PROGRESS_BEHIND = Cesium.Color.fromCssColorString('#ffd58a').withAlpha(0.75);   // light amber: already driven
+let _progressFabricRegistered = false;
+function ensureProgressFabricRegistered() {
+  if (_progressFabricRegistered) return;
+  new Cesium.Material({
+    fabric: {
+      type: 'GevRouteProgress',
+      uniforms: { ahead: PROGRESS_AHEAD, behind: PROGRESS_BEHIND, split: -1.0 },
+      source: `
+        czm_material czm_getMaterial(czm_materialInput materialInput) {
+          czm_material m = czm_getDefaultMaterial(materialInput);
+          float s = materialInput.st.s;
+          float w = smoothstep(split - 0.002, split + 0.002, s);   // 0 behind the deck, 1 ahead (a crisp edge)
+          vec4 c = mix(behind, ahead, w);
+          m.diffuse = c.rgb; m.emission = c.rgb * 0.35; m.alpha = c.a;
+          return m;
+        }`,
+    },
+  });
+  _progressFabricRegistered = true;
+}
+export function ProgressMaterialProperty(anno) {
+  ensureProgressFabricRegistered();
+  this._anno = anno;
+  this._definitionChanged = new Cesium.Event();
+}
+Object.defineProperties(ProgressMaterialProperty.prototype, {
+  isConstant: { get() { return false; } },
+  definitionChanged: { get() { return this._definitionChanged; } },
+});
+ProgressMaterialProperty.prototype.getType = function getType() { return 'GevRouteProgress'; };
+ProgressMaterialProperty.prototype.getValue = function getValue(time, result) {
+  if (!Cesium.defined(result)) result = {};
+  result.ahead = PROGRESS_AHEAD;
+  result.behind = PROGRESS_BEHIND;
+  const win = this._anno._deckWin, along = this._anno._deckAlong ? this._anno._deckAlong() : null;
+  result.split = win && along != null && win[1] > win[0] ? (along - win[0]) / (win[1] - win[0]) : -1.0;   // -1: all orange
+  return result;
+};
+ProgressMaterialProperty.prototype.equals = function equals(other) { return this === other; };
 
 /** The ring with its first vertex repeated at the end, so an outline closes. */
 function closedRing(ring) {
