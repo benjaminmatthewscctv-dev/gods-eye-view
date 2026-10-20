@@ -31,6 +31,9 @@ const MIN_SPEED_MPH = 4;        // below this the GPS course is noise: hold the 
 const RANGE_EASE_S = 2.5;       // the chase distance follows speed slowly - a stop or a burst of speed no longer snaps the zoom
 const HEADING_EASE_S = 0.8;     // the view turns with the road smoothly instead of jumping to each GPS course
 const M_PER_DEG = 111320;
+const GROUND_EVERY_MS = 300;    // how often the ground under the deck is re-sampled from the rendered map
+const GEOID_N = -29;            // ellipsoid - sea level (EGM96) around north Alabama; only for the GPS-altitude fallback
+const ABOVE_GROUND_M = 1.5;     // the marker / camera target sits this far above the ground
 
 function waitForEmbed() {
   return new Promise((resolve) => {
@@ -49,11 +52,11 @@ async function main() {
 
   // fix = the latest real fix {lat, lon, tMs (when the GPS took it, epoch ms), mph, course}; disp = what is drawn
   const state = { heading: 0, mph: 0, mode: 'chase', fix: false, active: false, lastT: 0, lastFixMs: 0, pitchTop: -89,
-                  lastLat: NaN, lastLon: NaN, fixData: null, disp: null, lagS: null };
+                  lastLat: NaN, lastLon: NaN, fixData: null, disp: null, lagS: null, ground: null, groundSrc: '', groundAt: 0, altMsl: null };
   const drawn = new Cesium.Cartesian3();
   const marker = viewer.entities.add({
     id: 'cyberdeck-vehicle',
-    position: new Cesium.CallbackProperty(() => (state.disp ? Cesium.Cartesian3.fromDegrees(state.disp.lon, state.disp.lat, 0, undefined, drawn) : undefined), false),
+    position: new Cesium.CallbackProperty(() => (state.disp ? Cesium.Cartesian3.fromDegrees(state.disp.lon, state.disp.lat, (state.ground ?? 0) + ABOVE_GROUND_M, undefined, drawn) : undefined), false),
     point: { pixelSize: 14, color: Cesium.Color.CYAN, outlineColor: Cesium.Color.BLACK, outlineWidth: 2, disableDepthTestDistance: Number.POSITIVE_INFINITY },
     label: { text: 'cyberdeck', font: '13px sans-serif', pixelOffset: new Cesium.Cartesian2(0, -20), fillColor: Cesium.Color.WHITE, outlineColor: Cesium.Color.BLACK, outlineWidth: 3, style: Cesium.LabelStyle.FILL_AND_OUTLINE, disableDepthTestDistance: Number.POSITIVE_INFINITY },
     show: false,
@@ -69,6 +72,7 @@ async function main() {
       if (p.fix && Number.isFinite(p.lat) && Number.isFinite(p.lon) && p.t && p.t !== state.lastT && !(p.lat === state.lastLat && p.lon === state.lastLon)) {
         const tMs = Number.isFinite(p.fix_t) ? p.fix_t * 1000 : (p.t - ARRIVAL_LAG_S) * 1000;
         state.lagS = Number.isFinite(p.fix_lag_s) ? p.fix_lag_s : null;
+        state.altMsl = Number.isFinite(p.alt_msl) ? p.alt_msl : state.altMsl;
         state.lastT = p.t; state.lastFixMs = performance.now(); state.lastLat = p.lat; state.lastLon = p.lon;
         state.mph = Number(p.mph) || 0;
         if (Number.isFinite(p.heading) && state.mph >= MIN_SPEED_MPH) state.heading = p.heading;
@@ -91,11 +95,33 @@ async function main() {
     return { lat: f.lat + (d * Math.cos(h)) / M_PER_DEG, lon: f.lon + (d * Math.sin(h)) / (M_PER_DEG * Math.cos(Cesium.Math.toRadians(f.lat))) };
   }
 
+  // The ground under the deck. Height 0 is the ellipsoid, which around here is ~200 m BELOW the real ground: the chase camera ended
+  // up inside the photorealistic tiles (a black screen with only the dot - owner's photo 2026-10-20). Sample the rendered map;
+  // when it cannot answer yet, use the GPS altitude (sea level -> ellipsoid); keep the last good value otherwise.
+  const scratchCarto = new Cesium.Cartographic();
+  function updateGround(nowMs) {
+    if (!state.disp || nowMs - state.groundAt < GROUND_EVERY_MS) return;
+    state.groundAt = nowMs;
+    let h;
+    try {
+      if (scene.sampleHeightSupported) {
+        Cesium.Cartographic.fromDegrees(state.disp.lon, state.disp.lat, 0, scratchCarto);
+        h = scene.sampleHeight(scratchCarto, [marker]);
+      }
+    } catch { h = undefined; }
+    if (Number.isFinite(h)) {
+      state.ground = state.ground == null || state.groundSrc !== 'map' ? h : state.ground + (h - state.ground) * 0.3; state.groundSrc = 'map';
+    } else if (Number.isFinite(state.altMsl) && state.groundSrc !== 'map') {
+      state.ground = state.altMsl + GEOID_N - ABOVE_GROUND_M; state.groundSrc = 'gps';
+    }
+  }
+
   const hpr = new Cesium.HeadingPitchRange();
   let lastFrameMs = 0;
   function frame() {
     const t = performance.now(), dt = lastFrameMs ? Math.min(0.5, (t - lastFrameMs) / 1000) : 0; lastFrameMs = t;
     const est = estimate(Date.now());
+    updateGround(t);
     if (est && state.disp) {
       const dy = (est.lat - state.disp.lat) * M_PER_DEG, dx = (est.lon - state.disp.lon) * M_PER_DEG * Math.cos(Cesium.Math.toRadians(est.lat));
       if (Math.hypot(dx, dy) > SNAP_M) { state.disp = { ...est }; }
@@ -115,7 +141,7 @@ async function main() {
     hpr.heading = Cesium.Math.toRadians(state.viewHeading);
     hpr.pitch = Cesium.Math.toRadians(mode === 'top' ? state.pitchTop : -32);
     hpr.range = state.viewRange;
-    viewer.camera.lookAt(Cesium.Cartesian3.fromDegrees(state.disp.lon, state.disp.lat, 0), hpr);
+    viewer.camera.lookAt(Cesium.Cartesian3.fromDegrees(state.disp.lon, state.disp.lat, (state.ground ?? 0) + ABOVE_GROUND_M), hpr);
   }
   scene.preRender.addEventListener(frame);
   // a view posted by the deck (layers, pins) must not leave the camera locked to the marker's frame
