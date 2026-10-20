@@ -6,7 +6,7 @@ After=network.target
 
 [Service]
 Environment=GEV_ROOT=%h/gods-eye-view
-Environment=NODE_OPTIONS=--max-old-space-size=1536
+Environment="NODE_OPTIONS=--max-old-space-size=1536 --network-family-autoselection-attempt-timeout=3000"
 WorkingDirectory=%h/gods-eye-view
 ExecStartPre=-/usr/bin/timeout 60 /usr/bin/python3 %h/godseye/aldot_cameras.py
 ExecStart=/bin/bash -lc 'export NVM_DIR="$HOME/.nvm"; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && nvm use --silent 24 >/dev/null; exec npx vite --config "$HOME/godseye/vite.deck.config.mjs"'
