@@ -185,6 +185,36 @@ async function main() {
     } catch { /* try again on the next poll */ } finally { route.fetching = false; }
   }
   globalThis.__deckRoute = route;
+
+  // ---- road info markers (owner 2026-10-20): ALPR / Flock cameras, Alabama DOT events, Rad's own detections and the owner's reports,
+  // from the deck's /gev/alerts (roadinfo.py). One point + label each, clamped onto the map, kept in step every 3 s.
+  const MARK = {
+    flock: ['#ff4fd8', 'FLOCK'], alpr: ['#ff4fd8', 'ALPR'], crash: ['#ff3030', 'CRASH'], closure: ['#ff3030', 'CLOSED'],
+    incident: ['#ffe14f', null], roadwork: ['#c98a3a', 'WORK'], detection: ['#b45cff', null],
+    police: ['#4f8bff', 'POLICE'], emergency: ['#4f8bff', 'EMERGENCY'], hazard: ['#ffe14f', 'HAZARD'],
+  };
+  const marks = new Map();
+  async function syncMarks() {
+    let a; try { a = await (await fetch('/deck/alerts', { cache: 'no-store' })).json(); } catch { return; }
+    const seen = new Set();
+    for (const it of a.items || []) {
+      if (!Number.isFinite(it.lat) || !Number.isFinite(it.lon)) continue;
+      seen.add(it.id); if (marks.has(it.id)) continue;
+      const [css, word] = MARK[it.kind] || ['#ffffff', null];
+      const color = Cesium.Color.fromCssColorString(css);
+      marks.set(it.id, viewer.entities.add({
+        position: Cesium.Cartesian3.fromDegrees(it.lon, it.lat, 0),
+        point: { pixelSize: it.kind === 'flock' || it.kind === 'alpr' ? 10 : 13, color, outlineColor: Cesium.Color.BLACK, outlineWidth: 2,
+                 heightReference: Cesium.HeightReference.CLAMP_TO_GROUND, disableDepthTestDistance: Number.POSITIVE_INFINITY,
+                 distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0, 40000) },
+        label: { text: word || it.title || it.kind, font: 'bold 12px sans-serif', fillColor: color, outlineColor: Cesium.Color.BLACK, outlineWidth: 3,
+                 style: Cesium.LabelStyle.FILL_AND_OUTLINE, pixelOffset: new Cesium.Cartesian2(0, -16), heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+                 disableDepthTestDistance: Number.POSITIVE_INFINITY, distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0, 6000) },
+      }));
+    }
+    for (const [id, e] of marks) if (!seen.has(id)) { viewer.entities.remove(e); marks.delete(id); }
+  }
+  setInterval(syncMarks, 3000); syncMarks();
   setInterval(recut, 1000);
 
   const hpr = new Cesium.HeadingPitchRange();

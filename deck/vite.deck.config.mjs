@@ -72,6 +72,15 @@ function deckPlugin() {
         res.statusCode = r.status; res.end(await r.text());
       } catch { res.statusCode = 503; res.end('{"ok":false,"error":"deck app not answering"}'); }
     });
+    // road info around the deck (ALPR / Flock, DOT events, Rad detections, reports) - deck/follow.js draws them as markers
+    server.middlewares.use('/deck/alerts', async (req, res) => {
+      res.setHeader('Cache-Control', 'no-store'); res.setHeader('Content-Type', 'application/json');
+      try {
+        const ctl = new AbortController(); const timer = setTimeout(() => ctl.abort(), 3000);
+        const r = await fetch(`${deckApp}/gev/alerts`, { signal: ctl.signal }); clearTimeout(timer);
+        res.statusCode = r.status; res.end(await r.text());
+      } catch { res.statusCode = 503; res.end('{"ok":false,"error":"deck app not answering"}'); }
+    });
     // the route the deck is navigating (deck/follow.js draws it as the progress bar)
     server.middlewares.use('/deck/route', async (req, res) => {
       res.setHeader('Cache-Control', 'no-store'); res.setHeader('Content-Type', 'application/json');
