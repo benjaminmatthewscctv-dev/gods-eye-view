@@ -141,6 +141,77 @@ async function cancelBody(response) {
   }
 }
 
+
+// ---- cyberdeck branch: Valhalla fallback (owner 2026-10-20). On the deck's phone hotspot the carrier could not reach the
+// FOSSGIS OSRM server (router.project-osrm.org -> routing.openstreetmap.de, 5.148.170.168: every connect timed out) while
+// FOSSGIS's Valhalla (valhalla1.openstreetmap.de, also public, no key) answered in ~1 s. When the OSRM request fails at the
+// network level, the same route is asked of Valhalla and returned in OSRM's shape, so projectRouteResult / normalizeOsrmSteps
+// and every caller (the deck's turn-by-turn, the route annotation) see no difference. VALHALLA_BASE overrides the endpoint.
+const VALHALLA_BASE = process.env.VALHALLA_BASE || 'https://valhalla1.openstreetmap.de';
+const VALHALLA_COSTING = { car: 'auto', bike: 'bicycle', foot: 'pedestrian' };
+function decodePolyline6(str) {
+  const out = []; let i = 0, lat = 0, lon = 0;
+  while (i < str.length) {
+    for (const which of [0, 1]) {
+      let shift = 0, result = 0, b;
+      do { b = str.charCodeAt(i++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20 && i < str.length);
+      const d = result & 1 ? ~(result >> 1) : result >> 1;
+      if (which === 0) lat += d; else lon += d;
+    }
+    out.push([lon / 1e6, lat / 1e6]);
+  }
+  return out;
+}
+// Valhalla maneuver type -> OSRM {type, modifier}
+function valhallaManeuver(m) {
+  const t = Number(m.type);
+  const turn = (modifier) => ({ type: 'turn', modifier });
+  switch (t) {
+    case 1: case 2: case 3: return { type: 'depart', modifier: t === 2 ? 'right' : t === 3 ? 'left' : null };
+    case 4: case 5: case 6: return { type: 'arrive', modifier: t === 5 ? 'right' : t === 6 ? 'left' : null };
+    case 9: return turn('slight right'); case 10: return turn('right'); case 11: return turn('sharp right');
+    case 12: case 13: return turn('uturn');
+    case 14: return turn('sharp left'); case 15: return turn('left'); case 16: return turn('slight left');
+    case 17: return { type: 'on ramp', modifier: 'straight' }; case 18: return { type: 'on ramp', modifier: 'right' };
+    case 19: return { type: 'on ramp', modifier: 'left' };
+    case 20: return { type: 'off ramp', modifier: 'right' }; case 21: return { type: 'off ramp', modifier: 'left' };
+    case 23: return { type: 'fork', modifier: 'slight right' }; case 24: return { type: 'fork', modifier: 'slight left' };
+    case 25: return { type: 'merge', modifier: 'straight' }; case 37: return { type: 'merge', modifier: 'slight right' };
+    case 38: return { type: 'merge', modifier: 'slight left' };
+    case 26: return { type: 'roundabout', modifier: null, exit: Number.isInteger(m.roundabout_exit_count) ? m.roundabout_exit_count : undefined };
+    case 27: return { type: 'exit roundabout', modifier: null };
+    default: return { type: 'continue', modifier: 'straight' };
+  }
+}
+async function fetchValhallaAsOsrm({ profile, coords, fetchImpl }) {
+  const locations = coords.split(';').map((c) => { const [lon, lat] = c.split(',').map(Number); return { lat, lon }; });
+  const body = { locations, costing: VALHALLA_COSTING[profile] || 'auto', directions_options: { units: 'kilometers' } };
+  const url = `${VALHALLA_BASE.replace(/\/$/, '')}/route?json=${encodeURIComponent(JSON.stringify(body))}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  let v;
+  try {
+    const r = await fetchImpl(url, { signal: controller.signal, redirect: 'error', headers: { 'User-Agent': 'gods-eye-view/dev (local; cyberdeck)' } });
+    if (!r.ok) { await cancelBody(r); return null; }
+    v = JSON.parse(await readResponseTextCapped(r, ROUTE_MAX_RESPONSE_BYTES));
+  } finally { clearTimeout(timer); }
+  const trip = v?.trip;
+  if (!trip?.legs?.length) return null;
+  const coordinates = []; const legs = [];
+  for (const leg of trip.legs) {
+    const shape = decodePolyline6(leg.shape || '');
+    const steps = (leg.maneuvers || []).map((m) => {
+      const mv = valhallaManeuver(m); const loc = shape[Math.min(m.begin_shape_index || 0, shape.length - 1)] || shape[0];
+      const maneuver = { type: mv.type, location: loc }; if (mv.modifier) maneuver.modifier = mv.modifier; if (Number.isInteger(mv.exit)) maneuver.exit = mv.exit;
+      return { maneuver, name: (m.street_names && m.street_names[0]) || '', distance: (Number(m.length) || 0) * 1000, duration: Number(m.time) || 0 };
+    });
+    coordinates.push(...(coordinates.length ? shape.slice(1) : shape));
+    legs.push({ steps });
+  }
+  if (coordinates.length < 2) return null;
+  return { geometry: { coordinates }, distance: (Number(trip.summary?.length) || 0) * 1000, duration: Number(trip.summary?.time) || 0, legs };
+}
+
 /**
  * Fetch one route from the routing service and project it.
  * @param {object} request
@@ -200,6 +271,14 @@ async function fetchRoute({
       ROUTE_MAX_RESPONSE_BYTES,
     );
     osrm = JSON.parse(text);
+  } catch (e) {
+    if (e instanceof UpstreamRateLimitError || e instanceof RouteBusyError) throw e;
+    // the OSRM server did not answer (network error / timeout): ask Valhalla instead
+    let alt = null;
+    try { alt = await fetchValhallaAsOsrm({ profile, coords, fetchImpl }); } catch (e2) { console.error('[Route Proxy] valhalla:', e2?.message || e2); }
+    if (!alt) throw e;
+    console.error('[Route Proxy] OSRM failed (' + (e?.message || e) + '); route from Valhalla');
+    osrm = { code: 'Ok', routes: [alt] };
   } finally {
     clearTimeout(timer);
   }
