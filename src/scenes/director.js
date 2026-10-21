@@ -1948,6 +1948,12 @@ export class SceneDirector {
     }
     // Trigger a browser download via a temporary anchor element
     const blob = new Blob([payload], { type: 'application/json' });
+    if (globalThis.__deckClips) {                       // cyberdeck branch: the deck keeps it (STUDIO tab, deck/follow.js)
+      globalThis.__deckClips.save(fileName, blob);
+      this._presentation.status = 'Project exported to the deck';
+      this._publish({ type: 'project-exported', project: this._project });
+      return;
+    }
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
@@ -2039,6 +2045,10 @@ export class SceneDirector {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     const fileName = `scene-run-${stamp}.json`;
     const blob = new Blob([this._lastRunJson], { type: 'application/json' });
+    if (globalThis.__deckClips) {                       // cyberdeck branch: to the deck's STUDIO drop folder
+      globalThis.__deckClips.save(fileName, blob);
+      return;
+    }
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;

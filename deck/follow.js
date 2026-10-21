@@ -186,6 +186,57 @@ async function main() {
   }
   globalThis.__deckRoute = route;
 
+  // ---- STUDIO tab (owner 2026-10-21): record the globe as a take. The deck's studio.py queues record_start / record_stop
+  // (/deck/clipcmd); the canvas is captured with MediaRecorder (webm, VP8 - the Pi 5 has no video encoder, so modest settings) and
+  // the clip is streamed to the deck (/deck/clips/upload -> the ScrapWired hub's current episode). Status goes back the same way.
+  const REC_FPS = 30, REC_BPS = 5e6, REC_MAX_S = 900;
+  const clip = { rec: null, chunks: [], startedMs: 0, timer: null };
+  async function clipReport(status, detail) { try { await fetch('/deck/clipcmd', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status, detail: detail || '' }) }); } catch { /* next poll */ } }
+  function clipStart() {
+    if (clip.rec) return;
+    try {
+      const stream = viewer.canvas.captureStream(REC_FPS);
+      const mime = ['video/webm;codecs=vp8', 'video/webm'].find((m) => MediaRecorder.isTypeSupported(m)) || '';
+      clip.rec = new MediaRecorder(stream, { mimeType: mime || undefined, videoBitsPerSecond: REC_BPS });
+      clip.chunks = []; clip.startedMs = performance.now();
+      clip.rec.ondataavailable = (e) => { if (e.data && e.data.size) clip.chunks.push(e.data); };
+      clip.rec.onerror = (e) => { clipReport('error', 'recorder: ' + (e.error?.message || e.name || 'failed')); clipStop(false); };
+      clip.rec.onstop = () => clipUpload();
+      clip.rec.start(1000);
+      clip.timer = setTimeout(() => clipStop(true), REC_MAX_S * 1000);
+      clipReport('recording', (mime || 'webm') + ' ' + viewer.canvas.width + 'x' + viewer.canvas.height);
+    } catch (e) { clip.rec = null; clipReport('error', 'cannot record this canvas: ' + (e.message || e)); }
+  }
+  function clipStop(upload = true) {
+    clearTimeout(clip.timer);
+    const r = clip.rec; if (!r) return;
+    clip.upload = upload;
+    try { r.stop(); } catch { clip.rec = null; }
+  }
+  async function clipUpload() {
+    const r = clip.rec; clip.rec = null;
+    const durS = (performance.now() - clip.startedMs) / 1000;
+    const blob = new Blob(clip.chunks, { type: (r && r.mimeType) || 'video/webm' }); clip.chunks = [];
+    if (!clip.upload || blob.size < 1000) { clipReport('idle', 'nothing recorded'); return; }
+    clipReport('uploading', (blob.size / 1e6).toFixed(1) + ' MB');
+    try {
+      const res = await fetch('/deck/clips/upload?ext=webm&source=map&dur=' + durS.toFixed(2) + '&label=' + encodeURIComponent('globe ' + new Date().toISOString().slice(0, 16)), { method: 'POST', body: blob });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok || !j.ok) clipReport('error', j.error || ('upload failed ' + res.status));
+    } catch (e) { clipReport('error', 'upload: ' + (e.message || e)); }
+  }
+  async function clipPoll() {
+    try {
+      const r = await fetch('/deck/clipcmd', { cache: 'no-store' }); if (!r.ok) return;
+      const { cmd } = await r.json(); if (!cmd) return;
+      if (cmd.action === 'record_start') clipStart(); else if (cmd.action === 'record_stop') clipStop(true);
+    } catch { /* deck app away */ }
+  }
+  setInterval(clipPoll, 1000);
+  globalThis.__deckClips = { start: clipStart, stop: clipStop,
+    // the globe director's exports (scene project / run telemetry JSON) land on the deck instead of the browser's download folder
+    save(fileName, blob) { return fetch('/deck/clips/upload?ext=json&source=director&label=' + encodeURIComponent(fileName), { method: 'POST', body: blob }); } };
+
   // ---- road info markers (owner 2026-10-20): ALPR / Flock cameras, Alabama DOT events, Rad's own detections and the owner's reports,
   // from the deck's /gev/alerts (roadinfo.py). One point + label each, clamped onto the map, kept in step every 3 s.
   const MARK = {

@@ -15,6 +15,7 @@
  * Env (from ~/gods-eye-view/.env, written by setup.sh): HOST=127.0.0.1 PORT=4173, GEV_EMBED_FRAME_ANCESTORS so the
  * cyberdeck window (:8130) may frame the embed page, DECK_MIND_URL for the HUD caption.
  */
+import http from 'node:http';
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
@@ -71,6 +72,27 @@ function deckPlugin() {
         const r = await fetch(`${deckApp}/gev/pos`, { signal: ctl.signal }); clearTimeout(timer);
         res.statusCode = r.status; res.end(await r.text());
       } catch { res.statusCode = 503; res.end('{"ok":false,"error":"deck app not answering"}'); }
+    });
+    // STUDIO tab recordings: the deck asks deck/follow.js to record the globe (GET /deck/clipcmd), follow.js reports back (POST)
+    const passJson = async (req, res, target) => {
+      res.setHeader('Cache-Control', 'no-store'); res.setHeader('Content-Type', 'application/json');
+      try {
+        const body = req.method === 'POST' ? await readBody(req) : undefined;
+        const ctl = new AbortController(); const timer = setTimeout(() => ctl.abort(), 4000);
+        const r = await fetch(`${deckApp}${target}`, { method: req.method, headers: body ? { 'Content-Type': 'application/json' } : {}, body, signal: ctl.signal }); clearTimeout(timer);
+        res.statusCode = r.status; res.end(await r.text());
+      } catch { res.statusCode = 503; res.end('{"ok":false,"error":"deck app not answering"}'); }
+    };
+    server.middlewares.use('/deck/clipcmd', (req, res) => passJson(req, res, '/gev/clipcmd'));
+    // the recorded clip itself (tens to hundreds of MB): streamed through to the deck app, never buffered here
+    server.middlewares.use('/deck/clips/upload', (req, res) => {
+      const u = new URL(deckApp); const q = (req.url || '').includes('?') ? (req.url || '').slice((req.url || '').indexOf('?')) : '';
+      const out = http.request({ host: u.hostname, port: u.port || 80, path: '/studio/upload' + q, method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': req.headers['content-length'] || '0' } }, (r) => {
+        res.statusCode = r.statusCode || 502; res.setHeader('Content-Type', 'application/json'); r.pipe(res);
+      });
+      out.on('error', () => { res.statusCode = 503; res.end('{"ok":false,"error":"deck app not answering"}'); });
+      req.pipe(out);
     });
     // road info around the deck (ALPR / Flock, DOT events, Rad detections, reports) - deck/follow.js draws them as markers
     server.middlewares.use('/deck/alerts', async (req, res) => {
