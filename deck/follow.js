@@ -45,6 +45,9 @@ function waitForEmbed() {
 async function main() {
   const { viewer } = await waitForEmbed();
   const scene = viewer.scene;
+  // ?fps=N caps the render rate (the BIMO display's copy of the map is captured at ~2 fps by display_map.py: no need to render at 60)
+  const fpsCap = Number(new URLSearchParams(location.search).get('fps'));
+  if (Number.isFinite(fpsCap) && fpsCap > 0) viewer.targetFrameRate = fpsCap;
   // The deck's screen is the whole map: GEV's signature circular "scope" mask (scopeMask.js, on by default) blacks out everything
   // outside a keyhole circle. Off in the deck view, and kept off if the app's restored state turns it back on.
   const scopeOff = () => { try { if (isScopeMaskEnabled()) setScopeMaskEnabled(false); } catch { /* older app build */ } };
