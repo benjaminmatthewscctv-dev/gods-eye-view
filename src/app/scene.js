@@ -93,6 +93,31 @@ export async function createApplicationScene({
       loaderStatus.textContent = `Google 3D Tiles unavailable (${tileErrorDetail}). Loading the keyless globe...`;
     }
     viewer.scene.globe.show = true;
+    // The deck's pages often start before the car's hotspot is up: keep trying for the imagery instead of
+    // showing the bare globe until someone reloads the page (every 30 s, for up to an hour).
+    let retries = 0;
+    const retry = async () => {
+      if (signal.aborted || viewer.isDestroyed() || retries++ >= 120) return;
+      try {
+        const again = await loadPhotorealisticTileset(Cesium, { googleApiKey, googleTokens, cesiumToken });
+        if (signal.aborted || viewer.isDestroyed()) { again.tileset?.destroy?.(); return; }
+        if (again.tileset) {
+          viewer.scene.primitives.add(again.tileset);
+          viewer.scene.globe.show = false;
+          defer(() => {
+            if (!again.tileset.isDestroyed()) {
+              if (!viewer.scene.primitives.remove(again.tileset)) again.tileset.destroy();
+            }
+          });
+          console.info(`[Init] Google 3D Tiles loaded on retry ${retries} via ${again.route}.`);
+          return;
+        }
+      } catch (e) {
+        console.warn('[Init] Google 3D Tiles retry failed:', e);
+      }
+      setTimeout(retry, 30000);
+    };
+    setTimeout(retry, 30000);
   }
 
   loaderStatus.textContent = 'Initializing systems...';
