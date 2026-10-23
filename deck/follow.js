@@ -199,6 +199,7 @@ async function main() {
   const corr = { set: null, applied: '', tileset: null, builtT: null, builtAlong: -1e9, builtW: 0, clipped: false, orig: null, sceneOrig: null,
                  fps: 0, frames: 0, lastFpsT: performance.now(), note: 'off' };
   globalThis.__deckCorridor = corr;
+  globalThis.__deckDebug = { Cesium, scene, viewer, route, state, corr, buildCorridor: (w) => buildCorridor(w) };   // for the debug port (display_map.py: 9229)
   scene.postRender.addEventListener(() => {
     corr.frames++; const now = performance.now();
     if (now - corr.lastFpsT >= 2000) { corr.fps = Math.round((corr.frames * 1000) / (now - corr.lastFpsT) * 10) / 10; corr.frames = 0; corr.lastFpsT = now; }
@@ -268,6 +269,7 @@ async function main() {
     }
     const ring = left.concat(right.reverse());
     const positions = Cesium.Cartesian3.fromDegreesArray(ring.flat());
+    corr.ring = ring;
     return { positions, along, n: ring.length };
   }
   function offRoute(w) {                                                // beyond 2.5 widths from the route = missed turn: clip nothing until the deck reroutes
