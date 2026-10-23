@@ -191,15 +191,19 @@ async function main() {
   globalThis.__deckRoute = route;
 
   // ---- corridor mode (owner 2026-10-23): "render only the segment of the globe we are driving". With a route guiding, the
-  // photoreal 3D tiles are clipped to a corridor around the route ahead (nothing outside it is loaded or drawn), the camera
-  // stops at far_m with fog closing the distance, and tile detail falls away from the centre of the view and with distance.
-  // The Pi then renders the road, not the city: the frame rate the BIMO display receives is the globe's repaint rate.
+  // photoreal 3D tiles are clipped to a corridor box around the deck along the road ahead (nothing outside it is loaded or
+  // drawn), the camera stops at far_m with fog closing the distance, and tile detail falls away from the centre of the view
+  // and with distance. The Pi then renders the road, not the city.
+  // The box is four clipping planes in the deck's local frame (ClippingPlaneCollection; Cesium's clipping POLYGONS only cull
+  // whole tiles on this chromium and never clip fragments). Its direction follows the route ahead, and the sides open by
+  // CORR_OPEN_DEG so bends up the road stay inside. The collection is created once per tileset and its planes are updated
+  // in place: replacing the collection while a frame is in flight stops Cesium's render loop (seen: "reading '_target'").
   // Settings come from the deck's MAP SET tab through /deck/pos: corridor auto|on|off, corridor_m (half width), far_m, detail lean|full.
-  const CORR_AHEAD_M = 6000, CORR_BEHIND_M = 600, CORR_REBUILD_M = 500, CORR_MAX_PTS = 150, CORR_OFFROUTE_X = 2.5;
-  const corr = { set: null, applied: '', tileset: null, builtT: null, builtAlong: -1e9, builtW: 0, clipped: false, orig: null, sceneOrig: null,
-                 fps: 0, frames: 0, lastFpsT: performance.now(), note: 'off' };
+  const CORR_BEHIND_M = 500, CORR_LOOK_M = 1500, CORR_OPEN_DEG = 12, CORR_MOVE_M = 25, CORR_TURN_DEG = 3, CORR_OFFROUTE_X = 2.5;
+  const corr = { set: null, applied: '', tileset: null, planes: null, planesFor: null, on: false, orig: null, sceneOrig: null, sign: -1,
+                 at: null, dir: NaN, fps: 0, frames: 0, lastFpsT: performance.now(), note: 'off' };
   globalThis.__deckCorridor = corr;
-  globalThis.__deckDebug = { Cesium, scene, viewer, route, state, corr, buildCorridor: (w) => buildCorridor(w) };   // for the debug port (display_map.py: 9229)
+  globalThis.__deckDebug = { Cesium, scene, viewer, route, state, corr };   // for the debug port (display_map.py: 9229)
   scene.postRender.addEventListener(() => {
     corr.frames++; const now = performance.now();
     if (now - corr.lastFpsT >= 2000) { corr.fps = Math.round((corr.frames * 1000) / (now - corr.lastFpsT) * 10) / 10; corr.frames = 0; corr.lastFpsT = now; }
@@ -248,36 +252,49 @@ async function main() {
   }
   function corridorWanted() {
     const mode = String((corr.set && corr.set.corridor) || 'auto');
-    if (mode === 'off' || !route.pts || route.pts.length < 2) return false;
-    return mode === 'on' || state.active;
+    if (mode === 'off') return false;
+    return mode === 'on' || (state.active && !!route.pts && route.pts.length >= 2);
   }
-  // the corridor polygon: the route from CORR_BEHIND_M behind the deck to CORR_AHEAD_M ahead, thinned to CORR_MAX_PTS points,
-  // offset by +-w metres (left side forward, right side back = one ring); rebuilt every CORR_REBUILD_M of progress
-  function buildCorridor(w) {
-    const p = route.pts, d = state.disp; if (!p || !d) return null;
-    const i0 = Math.max(0, Math.min(p.length - 1, route.hint)); const along = route.cum[i0];
-    let a = i0, b = i0; while (a > 0 && along - route.cum[a] < CORR_BEHIND_M) a--; while (b < p.length - 1 && route.cum[b] - along < CORR_AHEAD_M) b++;
-    if (b - a < 1) return null;
-    const step = Math.max(1, Math.ceil((b - a + 1) / CORR_MAX_PTS)); const idx = []; for (let i = a; i <= b; i += step) idx.push(i); if (idx[idx.length - 1] !== b) idx.push(b);
-    const k = kx(d.lat), left = [], right = [];
-    for (let j = 0; j < idx.length; j++) {
-      const q = p[idx[j]], qp = p[idx[Math.max(0, j - 1)]], qn = p[idx[Math.min(idx.length - 1, j + 1)]];
-      let dx = (qn[1] - qp[1]) * k, dy = (qn[0] - qp[0]) * M_PER_DEG; const L = Math.hypot(dx, dy) || 1; dx /= L; dy /= L;
-      const nx = -dy, ny = dx;                                           // left normal (metres)
-      left.push([q[1] + (nx * w) / k, q[0] + (ny * w) / M_PER_DEG]);
-      right.push([q[1] - (nx * w) / k, q[0] - (ny * w) / M_PER_DEG]);
+  // the direction of the road ahead: from the deck's place on the route to the point CORR_LOOK_M further along; the GPS
+  // heading when there is no route (corridor "on" without one)
+  function aheadDirDeg() {
+    const p = route.pts, d = state.disp;
+    if (p && p.length >= 2 && d) {
+      const i0 = Math.max(0, Math.min(p.length - 1, route.hint)); let b = i0; while (b < p.length - 1 && route.cum[b] - route.cum[i0] < CORR_LOOK_M) b++;
+      if (b > i0) { const k = kx(d.lat); const dx = (p[b][1] - p[i0][1]) * k, dy = (p[b][0] - p[i0][0]) * M_PER_DEG; if (dx || dy) return Cesium.Math.toDegrees(Math.atan2(dx, dy)); }
     }
-    const ring = left.concat(right.reverse());
-    const positions = Cesium.Cartesian3.fromDegreesArray(ring.flat());
-    corr.ring = ring;
-    return { positions, along, n: ring.length };
+    return state.heading;
   }
   function offRoute(w) {                                                // beyond 2.5 widths from the route = missed turn: clip nothing until the deck reroutes
-    const d = state.disp, p = route.pts; if (!d || !p) return true;
+    const d = state.disp, p = route.pts; if (!d || !p) return false;
     const k = kx(d.lat); let bd = Infinity;
     for (let i = Math.max(0, route.hint - 30); i < Math.min(p.length, route.hint + 30); i++) { const dx = (p[i][1] - d.lon) * k, dy = (p[i][0] - d.lat) * M_PER_DEG; bd = Math.min(bd, dx * dx + dy * dy); }
     return Math.sqrt(bd) > w * CORR_OFFROUTE_X;
   }
+  // the box: back / front / left / right planes in the deck's east-north-up frame, mapped into the tileset's clipping frame.
+  // Cesium keeps what is on the negative side of n.x + d (corr.sign = -1 encodes that; +1 flips every plane for a live check).
+  const mScratch = new Cesium.Matrix4(), mInv = new Cesium.Matrix4();
+  function setBox(ts, d, dirDeg, w, farM) {
+    if (!corr.planes || corr.planesFor !== ts) {
+      corr.planes = new Cesium.ClippingPlaneCollection({ planes: [0, 1, 2, 3].map(() => new Cesium.ClippingPlane(new Cesium.Cartesian3(0, 0, 1), 1e6)), unionClippingRegions: true, edgeWidth: 0, enabled: false });
+      ts.clippingPlanes = corr.planes; corr.planesFor = ts;
+    }
+    const h = Cesium.Math.toRadians(dirDeg), o = Cesium.Math.toRadians(CORR_OPEN_DEG), S = corr.sign;
+    const fx = Math.sin(h), fy = Math.cos(h);                              // forward (east, north)
+    const lx = -fy, ly = fx;                                               // left
+    const ahead = Math.max(1000, farM + 300);
+    // side planes rotated outward by CORR_OPEN_DEG: the corridor is w wide at the deck and wider up the road
+    const hl = h - o, hr = h + o;                                          // left side plane's normal, turned outward
+    const lnx = -Math.cos(hl), lny = Math.sin(hl);                         // left normal = left(h-o) = (-cos(h-o), sin(h-o))
+    const rnx = Math.cos(hr), rny = -Math.sin(hr);                         // right normal = right(h+o)
+    const def = [[fx, fy, CORR_BEHIND_M], [-fx, -fy, ahead], [lnx, lny, w], [rnx, rny, w]];
+    for (let i = 0; i < 4; i++) { const pl = corr.planes.get(i); pl.normal = new Cesium.Cartesian3(-S * def[i][0], -S * def[i][1], 0); pl.distance = -S * def[i][2]; }
+    const enu = Cesium.Transforms.eastNorthUpToFixedFrame(Cesium.Cartesian3.fromDegrees(d.lon, d.lat, 0), Cesium.Ellipsoid.WGS84, mScratch);
+    Cesium.Matrix4.inverse(ts.clippingPlanesOriginMatrix, mInv);
+    corr.planes.modelMatrix = Cesium.Matrix4.multiply(mInv, enu, new Cesium.Matrix4());
+    corr.planes.enabled = true; corr.on = true; corr.at = { lat: d.lat, lon: d.lon }; corr.dir = dirDeg;
+  }
+  function clearBox() { if (corr.planes && !corr.planes.isDestroyed()) corr.planes.enabled = false; corr.on = false; corr.at = null; }
   function corridorTick() {
     const ts = corr.tileset && !corr.tileset.isDestroyed() ? corr.tileset : (corr.tileset = findTileset());
     const s = corr.set || {}; const want = corridorWanted(); const lean = String(s.detail || 'lean') !== 'full';
@@ -285,18 +302,17 @@ async function main() {
     const key = [want, lean, w, farM].join('|');
     if (ts && key !== corr.applied) { applyDetail(ts, lean && want); applyDistance(farM, want); corr.applied = key; }
     if (!ts) { corr.note = 'no tileset'; return; }
-    if (!want) {
-      if (corr.clipped) { ts.clippingPolygons = undefined; corr.clipped = false; corr.builtAlong = -1e9; }
-      corr.note = route.pts ? 'route, corridor off' : 'no route'; return;
+    if (!want) { if (corr.on) clearBox(); corr.note = route.pts ? 'route, corridor off' : 'no route'; return; }
+    if (offRoute(w)) { if (corr.on) clearBox(); corr.note = 'off route: full view'; return; }
+    const d = state.disp; if (!d) { corr.note = 'no position'; return; }
+    const dir = aheadDirDeg();
+    if (corr.on && corr.at) {
+      const k = kx(d.lat), moved = Math.hypot((d.lon - corr.at.lon) * k, (d.lat - corr.at.lat) * M_PER_DEG);
+      let turn = Math.abs(dir - corr.dir) % 360; if (turn > 180) turn = 360 - turn;
+      if (moved < CORR_MOVE_M && turn < CORR_TURN_DEG) { corr.note = 'corridor ' + w + ' m, far ' + farM + ' m, dir ' + Math.round(dir); return; }
     }
-    if (offRoute(w)) { if (corr.clipped) { ts.clippingPolygons = undefined; corr.clipped = false; } corr.note = 'off route: full view'; corr.builtAlong = -1e9; return; }
-    const i0 = Math.max(0, Math.min(route.pts.length - 1, route.hint)); const along = route.cum[i0];
-    if (corr.clipped && corr.builtT === route.t && corr.builtW === w && Math.abs(along - corr.builtAlong) < CORR_REBUILD_M) { corr.note = 'corridor ' + w + ' m, far ' + farM + ' m'; return; }
-    const c = buildCorridor(w); if (!c) return;
-    try {
-      ts.clippingPolygons = new Cesium.ClippingPolygonCollection({ polygons: [new Cesium.ClippingPolygon({ positions: c.positions })], inverse: true, enabled: true });
-      corr.clipped = true; corr.builtT = route.t; corr.builtAlong = c.along; corr.builtW = w; corr.note = 'corridor ' + w + ' m (' + c.n + ' pts), far ' + farM + ' m';
-    } catch (e) { corr.note = 'clip failed: ' + (e && e.message); console.warn('[corridor]', e); }
+    try { setBox(ts, d, dir, w, farM); corr.note = 'corridor ' + w + ' m, far ' + farM + ' m, dir ' + Math.round(dir); }
+    catch (e) { corr.note = 'box failed: ' + (e && e.message); console.warn('[corridor]', e); }
   }
   setInterval(() => { try { corridorTick(); } catch (e) { corr.note = 'tick: ' + (e && e.message); } }, 500);
 
