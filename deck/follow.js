@@ -200,7 +200,7 @@ async function main() {
   // in place: replacing the collection while a frame is in flight stops Cesium's render loop (seen: "reading '_target'").
   // Settings come from the deck's MAP SET tab through /deck/pos: corridor auto|on|off, corridor_m (half width), far_m, detail lean|full.
   const CORR_BEHIND_M = 500, CORR_LOOK_M = 1500, CORR_OPEN_DEG = 12, CORR_MOVE_M = 25, CORR_TURN_DEG = 3, CORR_OFFROUTE_X = 2.5;
-  const corr = { set: null, applied: '', tileset: null, planes: null, planesFor: null, on: false, orig: null, sceneOrig: null, sign: -1,
+  const corr = { set: null, applied: '', tileset: null, planes: null, planesFor: null, on: false, orig: null, sceneOrig: null, sign: -1, clipBox: false,
                  at: null, dir: NaN, fps: 0, frames: 0, lastFpsT: performance.now(), note: 'off' };
   globalThis.__deckCorridor = corr;
   globalThis.__deckDebug = { Cesium, scene, viewer, route, state, corr };   // for the debug port (display_map.py: 9229)
@@ -305,6 +305,11 @@ async function main() {
     if (!want) { if (corr.on) clearBox(); corr.note = route.pts ? 'route, corridor off' : 'no route'; return; }
     if (offRoute(w)) { if (corr.on) clearBox(); corr.note = 'off route: full view'; return; }
     const d = state.disp; if (!d) { corr.note = 'no position'; return; }
+    // The clipping box is parked (corr.clipBox = true from the debug port to try it): on the Pi's chromium Cesium's clipping
+    // planes and polygons only cull whole tiles, and in a frame that did not match the deck's position for this tileset
+    // (clippingPlanesOriginMatrix at the Earth's centre). The far plane + fog + distance/foveated detail above are the bulk
+    // of the saving and are what "corridor" means until the box is pinned down on a desktop Cesium.
+    if (!corr.clipBox) { if (corr.on) clearBox(); corr.note = 'far ' + farM + ' m, ' + (lean ? 'lean' : 'full') + ' detail (box parked)'; return; }
     const dir = aheadDirDeg();
     if (corr.on && corr.at) {
       const k = kx(d.lat), moved = Math.hypot((d.lon - corr.at.lon) * k, (d.lat - corr.at.lat) * M_PER_DEG);
