@@ -48,6 +48,14 @@ async function main() {
   // ?fps=N caps the render rate (the BIMO display's copy of the map is captured at ~2 fps by display_map.py: no need to render at 60)
   const fpsCap = Number(new URLSearchParams(location.search).get('fps'));
   if (Number.isFinite(fpsCap) && fpsCap > 0) viewer.targetFrameRate = fpsCap;
+  // ?rs=0.7 renders at that fraction of the canvas and lets the browser scale it up: on the Pi 5 the globe is fill-rate bound,
+  // 0.7 took the display's copy from 7.6 to 14.3 fps (2026-10-24; 0.6 gave 15.1, 0.8 11.7)
+  const renderScale = Number(new URLSearchParams(location.search).get('rs'));
+  if (Number.isFinite(renderScale) && renderScale >= 0.4 && renderScale <= 1) { viewer.useBrowserRecommendedResolution = true; viewer.resolutionScale = renderScale; }
+  // The tile cache: upstream keeps 1.5 GB + 1 GB overflow of 3D tiles, which on the 8 GB Pi (two globes, the LLM, the cameras)
+  // filled swap and pinned ~2 GB of GPU memory. ?cache_mb=N (default 256) caps it; tiles still come back from the disk cache.
+  const cacheMb = Number(new URLSearchParams(location.search).get('cache_mb')) || 256;
+  const capCache = (ts) => { if (ts && !ts.__deckCapped) { ts.cacheBytes = cacheMb * 1e6; ts.maximumCacheOverflowBytes = Math.round(cacheMb * 0.25) * 1e6; ts.__deckCapped = true; } };
   // The deck's screen is the whole map: GEV's signature circular "scope" mask (scopeMask.js, on by default) blacks out everything
   // outside a keyhole circle. Off in the deck view, and kept off if the app's restored state turns it back on.
   const scopeOff = () => { try { if (isScopeMaskEnabled()) setScopeMaskEnabled(false); } catch { /* older app build */ } };
@@ -297,6 +305,7 @@ async function main() {
   function clearBox() { if (corr.planes && !corr.planes.isDestroyed()) corr.planes.enabled = false; corr.on = false; corr.at = null; }
   function corridorTick() {
     const ts = corr.tileset && !corr.tileset.isDestroyed() ? corr.tileset : (corr.tileset = findTileset());
+    capCache(ts);
     const s = corr.set || {}; const want = corridorWanted(); const lean = String(s.detail || 'lean') !== 'full';
     const w = Math.min(2000, Math.max(80, Number(s.corridor_m) || 350)), farM = Math.min(20000, Math.max(500, Number(s.far_m) || 2500));
     const key = [want, lean, w, farM].join('|');
